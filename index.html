@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; media-src blob:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Kamera Selfie · Notaris BAA</title>
+
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;background:#f1f5f7;color:#17324d;font:16px/1.5 Arial,sans-serif}
+    header{background:#142d47;color:#fff;padding:20px;border-bottom:3px solid #c49b50}
+    h1{font-size:20px;margin:0}
+    header p{font-size:13px;margin:6px 0 0}
+    main{max-width:600px;margin:20px auto;padding:0 16px}
+    .panel{background:#fff;border:1px solid #dce5eb;border-radius:14px;padding:18px}
+    video,img{display:block;background:#13283d;width:100%;max-height:55vh;object-fit:contain;border-radius:10px;margin:14px 0}
+    video{transform:scaleX(-1)}
+    button{font:inherit;min-height:48px;border:1px solid #b8cad6;border-radius:8px;padding:12px 16px;color:#17324d;background:#fff;cursor:pointer}
+    button.primary{background:#087f85;color:#fff;border-color:#087f85}
+    button:disabled{opacity:.5;cursor:default}
+    .actions{display:flex;gap:10px;flex-wrap:wrap}
+    .actions button{flex:1}
+    .notice{font-size:14px;background:#edf5f6;border-left:3px solid #087f85;padding:12px}
+    .muted{font-size:13px;color:#5b6e7e}
+    .error{color:#a53131}
+    [hidden]{display:none!important}
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Kamera Selfie · Notaris BAA</h1>
+    <p>Foto langsung untuk absensi kantor</p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <p class="notice">
+        Hadapkan wajah ke kamera depan, lalu tekan Ambil selfie.
+      </p>
+
+      <p id="status" role="status" aria-live="polite">
+        Menghubungkan kamera dengan aplikasi…
+      </p>
+
+      <video id="video" autoplay playsinline muted hidden></video>
+
+      <img
+        id="preview"
+        alt="Pratinjau selfie yang baru diambil"
+        hidden>
+
+      <div class="actions">
+        <button id="start" class="primary" disabled>
+          Aktifkan kamera depan
+        </button>
+        <button id="capture" class="primary" disabled hidden>
+          Ambil selfie
+        </button>
+        <button id="retake" hidden>
+          Ambil ulang
+        </button>
+        <button id="use" class="primary" disabled hidden>
+          Gunakan selfie
+        </button>
+      </div>
+
+      <p class="muted">
+        Foto berada sementara di browser dan dikirim kembali ke
+        aplikasi absensi. Halaman ini tidak mengunggah foto ke
+        GitHub atau menyimpannya di galeri.
+      </p>
+    </section>
+  </main>
+
+  <script>
+  (()=>{
+    'use strict';
+
+    const $=s=>document.querySelector(s);
+    const params=new URLSearchParams(location.hash.slice(1));
+    const nonce=params.get('nonce')||'';
+    const parentOrigin=params.get('parent')||'';
+
+    let stream=null;
+    let photo=null;
+    let capturedAt=0;
+    let connected=false;
+    let closed=false;
+    let sending=false;
+    let attempt=0;
+
+    const deadline=Date.now()+120000;
+
+    history.replaceState(null,'',location.pathname+location.search);
+
+    function note(text,error=false){
+      $('#status').textContent=text;
+      $('#status').className=error?'error':'';
+    }
+
+    function stop(){
+      attempt++;
+
+      if(stream){
+        stream.getTracks().forEach(t=>t.stop());
+        stream=null;
+      }
+
+      $('#video').srcObject=null;
+    }
+
+    function clearPhoto(){
+      photo=null;
+      capturedAt=0;
+      $('#preview').removeAttribute('src');
+      $('#preview').hidden=true;
+      $('#use').disabled=true;
+    }
+
+    function validParent(){
+      try{
+        const u=new URL(parentOrigin);
+
+        return u.origin===parentOrigin
+          && u.protocol==='https:'
+          && (
+            u.hostname==='script.google.com'
+            || /^(?:[a-z0-9-]+\.script|[a-z0-9-]+-script)\.googleusercontent\.com$/.test(u.hostname)
+            || u.hostname==='script.googleusercontent.com'
+          );
+      }catch{
+        return false;
+      }
+    }
+
+    function post(type,data={}){
+      if(window.opener){
+        window.opener.postMessage(
+          Object.assign({type,nonce},data),
+          parentOrigin
+        );
+      }
+    }
+
+    async function start(){
+      if(!connected||closed||Date.now()>deadline){
+        note(
+          'Sesi kamera berakhir. Tutup tab ini dan buka kamera kembali dari aplikasi.',
+          true
+        );
+        return;
+      }
+
+      stop();
+      clearPhoto();
+      sending=false;
+
+      const run=attempt;
+
+      $('#start').disabled=true;
+      $('#capture').disabled=true;
+      $('#capture').hidden=true;
+      $('#use').hidden=true;
+      $('#retake').hidden=true;
+      $('#video').hidden=false;
+
+      note('Meminta izin kamera depan…');
+
+      try{
+        if(!navigator.mediaDevices
+          || !navigator.mediaDevices.getUserMedia){
+          throw new Error(
+            'Kamera langsung tidak tersedia. Buka aplikasi melalui Safari atau Chrome biasa.'
+          );
+        }
+
+        const media=await navigator.mediaDevices.getUserMedia({
+          video:{
+            facingMode:{exact:'user'},
+            width:{ideal:960},
+            height:{ideal:1280}
+          },
+          audio:false
+        });
+
+        if(closed||run!==attempt||Date.now()>deadline){
+          media.getTracks().forEach(t=>t.stop());
+          return;
+        }
+
+        stream=media;
+
+        const video=$('#video');
+        video.srcObject=media;
+
+        media.getVideoTracks().forEach(t=>{
+          t.addEventListener('ended',()=>{
+            if(stream===media){
+              clearPhoto();
+              stop();
+              note('Kamera berhenti. Aktifkan kamera kembali.',true);
+              $('#start').hidden=false;
+              $('#start').disabled=false;
+              $('#capture').disabled=true;
+            }
+          });
+        });
+
+        await video.play();
+
+        if(closed||run!==attempt)return;
+
+        $('#start').hidden=true;
+        $('#capture').hidden=false;
+        $('#capture').disabled=!(
+          video.videoWidth
+          && video.videoHeight
+          && video.readyState>=2
+        );
+
+        video.onloadeddata=()=>{
+          if(stream===media){
+            $('#capture').disabled=false;
+          }
+        };
+
+        note('Kamera depan aktif. Pastikan wajah terlihat jelas.');
+      }catch(e){
+        if(closed||run!==attempt)return;
+
+        stop();
+        $('#video').hidden=true;
+        $('#start').hidden=false;
+        $('#start').disabled=false;
+
+        const message=e.name==='NotAllowedError'
+          ? 'Izin kamera ditolak. Izinkan kamera untuk halaman ini, lalu coba kembali.'
+          : e.name==='OverconstrainedError'||e.name==='NotFoundError'
+            ? 'Kamera depan tidak tersedia pada perangkat ini. Gunakan ponsel yang memiliki kamera depan.'
+            : e.message||'Kamera tidak dapat dibuka. Tutup aplikasi lain yang memakai kamera.';
+
+        note(message,true);
+      }
+    }
+
+    function capture(){
+      const v=$('#video');
+
+      if(!stream
+        || !stream.getVideoTracks().some(t=>t.readyState==='live')
+        || v.readyState<2
+        || !v.videoWidth
+        || Date.now()>deadline){
+        note(
+          'Kamera belum siap atau sesi berakhir. Buka kamera kembali.',
+          true
+        );
+        return;
+      }
+
+      const canvas=document.createElement('canvas');
+      const scale=Math.min(
+        1,
+        1200/Math.max(v.videoWidth,v.videoHeight)
+      );
+
+      canvas.width=Math.round(v.videoWidth*scale);
+      canvas.height=Math.round(v.videoHeight*scale);
+
+      canvas.getContext('2d').drawImage(
+        v,0,0,canvas.width,canvas.height
+      );
+
+      const data=canvas.toDataURL('image/jpeg',.82);
+      canvas.width=canvas.height=0;
+
+      if(data.length>4000000){
+        note('Foto terlalu besar. Ambil ulang.',true);
+        return;
+      }
+
+      photo={
+        mime:'image/jpeg',
+        data:data.split(',')[1]
+      };
+
+      capturedAt=Date.now();
+
+      stop();
+
+      $('#video').hidden=true;
+      $('#capture').hidden=true;
+      $('#preview').src=data;
+      $('#preview').hidden=false;
+      $('#retake').hidden=false;
+      $('#use').hidden=false;
+      $('#use').disabled=false;
+
+      note('Periksa selfie. Tekan Gunakan selfie atau Ambil ulang.');
+    }
+
+    function use(){
+      if(!photo
+        || Date.now()-capturedAt>60000
+        || Date.now()>deadline){
+        clearPhoto();
+        note('Foto kedaluwarsa. Ambil selfie baru.',true);
+        $('#retake').hidden=false;
+        return;
+      }
+
+      if(!window.opener||window.opener.closed){
+        note(
+          'Aplikasi asal sudah tertutup. Kembali ke aplikasi dan buka kamera ulang.',
+          true
+        );
+        return;
+      }
+
+      sending=true;
+      $('#use').disabled=true;
+
+      post('BAA_CAMERA_PHOTO',{photo,capturedAt});
+      note('Mengirim selfie kembali ke aplikasi…');
+
+      setTimeout(()=>{
+        if(sending){
+          sending=false;
+          $('#use').disabled=false;
+          note(
+            'Belum ada konfirmasi. Periksa aplikasi asal; jika foto belum tampil, tekan Gunakan selfie kembali.',
+            true
+          );
+        }
+      },5000);
+    }
+
+    window.addEventListener('message',e=>{
+      if(e.source!==window.opener
+        || e.origin!==parentOrigin
+        || !e.data
+        || e.data.nonce!==nonce){
+        return;
+      }
+
+      if(e.data.type==='BAA_CAMERA_START'&&!connected){
+        connected=true;
+        $('#start').disabled=false;
+        note('Tekan Aktifkan kamera depan, lalu izinkan kamera.');
+      }
+
+      if(e.data.type==='BAA_CAMERA_ACK'&&sending){
+        sending=false;
+        clearPhoto();
+        stop();
+
+        $('#use').hidden=true;
+        $('#retake').hidden=true;
+
+        note(
+          'Selfie diterima. Kembali ke aplikasi untuk mengirim absensi.'
+        );
+
+        setTimeout(()=>window.close(),250);
+      }
+    });
+
+    $('#start').onclick=start;
+    $('#retake').onclick=start;
+    $('#capture').onclick=capture;
+    $('#use').onclick=use;
+
+    window.addEventListener('pagehide',()=>{
+      closed=true;
+      stop();
+      clearPhoto();
+    });
+
+    document.addEventListener('visibilitychange',()=>{
+      if(document.hidden&&stream){
+        stop();
+        clearPhoto();
+
+        $('#start').hidden=false;
+        $('#start').disabled=false;
+        $('#capture').disabled=true;
+
+        note('Kamera dijeda. Aktifkan kamera kembali.');
+      }
+    });
+
+    if(!validParent()
+      || !/^[a-f0-9]{32,64}$/.test(nonce)
+      || !window.opener){
+      note(
+        'Buka halaman kamera melalui tombol Kamera depan di aplikasi absensi.',
+        true
+      );
+      return;
+    }
+
+    post('BAA_CAMERA_READY');
+
+    const ready=setInterval(()=>{
+      if(connected||Date.now()>deadline){
+        clearInterval(ready);
+      }else{
+        post('BAA_CAMERA_READY');
+      }
+    },500);
+
+    setTimeout(()=>{
+      if(!connected){
+        note(
+          'Aplikasi asal tidak terhubung. Tutup tab ini, lalu buka kamera dari aplikasi melalui Safari/Chrome biasa.',
+          true
+        );
+      }
+    },10000);
+
+    setTimeout(()=>{
+      if(!sending){
+        stop();
+        clearPhoto();
+
+        $('#capture').disabled=true;
+        $('#start').disabled=true;
+
+        note(
+          'Sesi kamera berakhir. Tutup tab ini dan buka kamera kembali dari aplikasi.',
+          true
+        );
+      }
+    },120000);
+  })();
+  </script>
+</body>
+</html>
