@@ -91,6 +91,7 @@
     let closed=false;
     let sending=false;
     let attempt=0;
+    let opening=false;
 
     const deadline=Date.now()+120000;
 
@@ -103,6 +104,8 @@
 
     function stop(){
       attempt++;
+      opening=false;
+      $('#video').onloadeddata=null;
 
       if(stream){
         stream.getTracks().forEach(t=>t.stop());
@@ -146,6 +149,8 @@
     }
 
     async function start(){
+      if(document.hidden||opening)return;
+
       if(!connected||closed||Date.now()>deadline){
         note(
           'Sesi kamera berakhir. Tutup tab ini dan buka kamera kembali dari aplikasi.',
@@ -159,6 +164,7 @@
       sending=false;
 
       const run=attempt;
+      opening=true;
 
       $('#start').disabled=true;
       $('#capture').disabled=true;
@@ -186,7 +192,7 @@
           audio:false
         });
 
-        if(closed||run!==attempt||Date.now()>deadline){
+        if(closed||document.hidden||run!==attempt||Date.now()>deadline){
           media.getTracks().forEach(t=>t.stop());
           return;
         }
@@ -211,7 +217,11 @@
 
         await video.play();
 
-        if(closed||run!==attempt)return;
+        if(closed||document.hidden||run!==attempt||Date.now()>deadline){
+          if(stream===media)stop();
+          else media.getTracks().forEach(t=>t.stop());
+          return;
+        }
 
         $('#start').hidden=true;
         $('#capture').hidden=false;
@@ -222,7 +232,9 @@
         );
 
         video.onloadeddata=()=>{
-          if(stream===media){
+          if(stream===media&&!closed&&!document.hidden
+            &&run===attempt&&Date.now()<=deadline
+            &&video.videoWidth&&video.videoHeight&&video.readyState>=2){
             $('#capture').disabled=false;
           }
         };
@@ -243,13 +255,15 @@
             : e.message||'Kamera tidak dapat dibuka. Tutup aplikasi lain yang memakai kamera.';
 
         note(message,true);
+      }finally{
+        if(run===attempt)opening=false;
       }
     }
 
     function capture(){
       const v=$('#video');
 
-      if(!stream
+      if(closed||document.hidden||!stream
         || !stream.getVideoTracks().some(t=>t.readyState==='live')
         || v.readyState<2
         || !v.videoWidth
@@ -303,7 +317,9 @@
     }
 
     function use(){
-      if(!photo
+      if(sending)return;
+
+      if(closed||document.hidden||!photo
         || Date.now()-capturedAt>60000
         || Date.now()>deadline){
         clearPhoto();
@@ -346,7 +362,7 @@
         return;
       }
 
-      if(e.data.type==='BAA_CAMERA_START'&&!connected){
+      if(e.data.type==='BAA_CAMERA_START'&&!connected&&!closed&&Date.now()<=deadline){
         connected=true;
         $('#start').disabled=false;
         note('Tekan Aktifkan kamera depan, lalu izinkan kamera.');
@@ -354,6 +370,7 @@
 
       if(e.data.type==='BAA_CAMERA_ACK'&&sending){
         sending=false;
+        closed=true;
         clearPhoto();
         stop();
 
@@ -380,13 +397,19 @@
     });
 
     document.addEventListener('visibilitychange',()=>{
-      if(document.hidden&&stream){
-        stop();
+      if(!document.hidden)return;
+
+      const wasActive=!!stream||opening;
+      stop();
+
+      if(wasActive){
         clearPhoto();
+        $('#video').hidden=true;
 
         $('#start').hidden=false;
-        $('#start').disabled=false;
+        $('#start').disabled=closed||!connected||Date.now()>deadline;
         $('#capture').disabled=true;
+        $('#capture').hidden=true;
 
         note('Kamera dijeda. Aktifkan kamera kembali.');
       }
@@ -422,18 +445,19 @@
     },10000);
 
     setTimeout(()=>{
-      if(!sending){
-        stop();
-        clearPhoto();
+      closed=true;
+      sending=false;
+      stop();
+      clearPhoto();
 
-        $('#capture').disabled=true;
-        $('#start').disabled=true;
+      $('#capture').disabled=true;
+      $('#start').disabled=true;
+      $('#retake').hidden=true;
 
-        note(
-          'Sesi kamera berakhir. Tutup tab ini dan buka kamera kembali dari aplikasi.',
-          true
-        );
-      }
+      note(
+        'Sesi kamera berakhir. Tutup tab ini dan buka kamera kembali dari aplikasi.',
+        true
+      );
     },120000);
   })();
   </script>
